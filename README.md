@@ -23,6 +23,11 @@
    ```
    wget -O smartcore.sh --no-check-certificate https://raw.githubusercontent.com/qqrrooty/smartcore/refs/heads/main/smartcore.sh && chmod +x smartcore.sh && ./smartcore.sh
    ```
+   国内CDN加速
+   ```
+   wget -O smartcore.sh --no-check-certificate https://cdn.gh-proxy.com/https://raw.githubusercontent.com/qqrrooty/smartcore/refs/heads/main/smartcore.sh && chmod +x smartcore.sh && ./smartcore.sh
+   ```
+   
 2. 运行脚本：`./smartcore.sh`
 
 ### 命令行参数
