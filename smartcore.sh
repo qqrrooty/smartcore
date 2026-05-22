@@ -20,9 +20,10 @@ SOURCE_REPO="vernesong/mihomo" # 默认使用vernesong镜像版本
 VERSION_TAG="Prerelease-Alpha"
 OS="linux"
 CHANGELOG_FILE="${TEMP_DIR}/changelog.txt"
-SCRIPT_VERSION="1.1.2" # 脚本版本号
+SCRIPT_VERSION="1.1.4" # 脚本版本号
 AUTO_UPDATE_SCHEDULE="0 3 * * *"
 AUTO_UPDATE_LOG="/tmp/smartcore_update.log"
+GITHUB_ACCELERATOR="${SMARTCORE_GITHUB_ACCELERATOR:-https://cdn.gh-proxy.com/}"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -33,6 +34,88 @@ NC='\033[0m' # 无颜色
 # 日志函数
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# 生成GitHub加速链接
+accelerate_github_url() {
+  TARGET_URL="$1"
+
+  case "$TARGET_URL" in
+    https://github.com/*|https://raw.githubusercontent.com/*|https://api.github.com/*)
+      if [ -n "$GITHUB_ACCELERATOR" ]; then
+        printf '%s%s\n' "${GITHUB_ACCELERATOR%/}/" "$TARGET_URL"
+        return 0
+      fi
+      ;;
+  esac
+
+  return 1
+}
+
+# curl封装：直连失败后自动尝试GitHub加速
+curl_with_accelerator_fallback() {
+  CURL_OUTPUT="$1"
+  shift
+  CURL_URL=""
+
+  for CURL_ARG in "$@"; do
+    case "$CURL_ARG" in
+      http://*|https://*) CURL_URL="$CURL_ARG" ;;
+    esac
+  done
+
+  if curl "$@" > "$CURL_OUTPUT"; then
+    return 0
+  fi
+
+  ACCELERATED_URL=$(accelerate_github_url "$CURL_URL" 2>/dev/null || echo "")
+  if [ -n "$ACCELERATED_URL" ]; then
+    log "直连失败，尝试使用GitHub加速下载..."
+    curl -s -L --connect-timeout 10 --max-time 20 "$ACCELERATED_URL" > "$CURL_OUTPUT"
+    return $?
+  fi
+
+  return 1
+}
+
+# 下载文件：优先直连，失败后使用GitHub加速
+download_file() {
+  DOWNLOAD_URL="$1"
+  DOWNLOAD_OUTPUT="$2"
+
+  if wget -q -O "$DOWNLOAD_OUTPUT" "$DOWNLOAD_URL" 2>/dev/null ||
+     curl -s -L -o "$DOWNLOAD_OUTPUT" "$DOWNLOAD_URL" 2>/dev/null; then
+    return 0
+  fi
+
+  ACCELERATED_URL=$(accelerate_github_url "$DOWNLOAD_URL" 2>/dev/null || echo "")
+  if [ -n "$ACCELERATED_URL" ]; then
+    log "直连下载失败，尝试使用GitHub加速下载..."
+    if wget -q -O "$DOWNLOAD_OUTPUT" "$ACCELERATED_URL" 2>/dev/null ||
+       curl -s -L -o "$DOWNLOAD_OUTPUT" "$ACCELERATED_URL" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# 检查URL是否可访问：直连失败后使用GitHub加速
+check_url_available() {
+  CHECK_URL="$1"
+
+  if curl -s -L --head --fail "$CHECK_URL" >/dev/null; then
+    return 0
+  fi
+
+  ACCELERATED_URL=$(accelerate_github_url "$CHECK_URL" 2>/dev/null || echo "")
+  if [ -n "$ACCELERATED_URL" ]; then
+    log "直连验证失败，尝试使用GitHub加速验证..."
+    curl -s -L --head --fail "$ACCELERATED_URL" >/dev/null
+    return $?
+  fi
+
+  return 1
 }
 
 # 获取脚本绝对路径，供计划任务使用
@@ -405,7 +488,7 @@ check_version() {
   TEMP_VERSION="${TEMP_DIR}/version.txt"
   VERSION_URL="https://github.com/${SOURCE_REPO}/releases/download/${VERSION_TAG}/version.txt"
   
-  if curl -s -L --connect-timeout 10 --max-time 15 "$VERSION_URL" > "$TEMP_VERSION"; then
+  if curl_with_accelerator_fallback "$TEMP_VERSION" -s -L --connect-timeout 10 --max-time 15 "$VERSION_URL"; then
     REMOTE_VERSION=$(cat "$TEMP_VERSION" | tr -d '\r\n')
     
     if [ -n "$REMOTE_VERSION" ]; then
@@ -415,7 +498,7 @@ check_version() {
       log "下载URL: $CLASH_URL"
       
       # 检查URL是否有效
-      if curl -s -L --head --fail "$CLASH_URL" >/dev/null; then
+      if check_url_available "$CLASH_URL"; then
         log "URL验证成功"
       else
         log "警告: URL验证失败，但仍将尝试下载"
@@ -465,8 +548,7 @@ update_core() {
   
   # 下载内核文件
   echo -ne "下载内核中..."
-  if wget -q -O "${TEMP_DIR}/${CLASH_FILENAME}" "$CLASH_URL" 2>/dev/null || 
-     curl -s -L -o "${TEMP_DIR}/${CLASH_FILENAME}" "$CLASH_URL" 2>/dev/null; then
+  if download_file "$CLASH_URL" "${TEMP_DIR}/${CLASH_FILENAME}"; then
     echo "完成"
   else
     echo "失败"
@@ -560,9 +642,9 @@ get_latest_changelog() {
   RELEASE_PAGE_FILE="${TEMP_DIR}/release_page.html"
 
   # 优先通过GitHub Release API获取日志
-  if curl -s -L --connect-timeout 10 --max-time 20 \
+  if curl_with_accelerator_fallback "$RELEASE_JSON_FILE" -s -L --connect-timeout 10 --max-time 20 \
     -H "Accept: application/vnd.github+json" \
-    "$RELEASE_API_URL" > "$RELEASE_JSON_FILE"; then
+    "$RELEASE_API_URL"; then
     if parse_release_json "$RELEASE_JSON_FILE"; then
       return 0
     fi
@@ -572,7 +654,7 @@ get_latest_changelog() {
   fi
 
   # 回退到旧的网页提取方式
-  if curl -s -L --connect-timeout 10 --max-time 20 "https://github.com/${SOURCE_REPO}/releases/tag/${VERSION_TAG}" > "$RELEASE_PAGE_FILE"; then
+  if curl_with_accelerator_fallback "$RELEASE_PAGE_FILE" -s -L --connect-timeout 10 --max-time 20 "https://github.com/${SOURCE_REPO}/releases/tag/${VERSION_TAG}"; then
     echo "Changelog" > "$CHANGELOG_FILE"
 
     if command -v lynx >/dev/null 2>&1; then
@@ -710,6 +792,7 @@ show_menu() {
   echo -e "- Nikki默认核心路径: ${CORE_PATH}"
   echo -e "- 更新前会自动备份当前内核"
   echo -e "- 如更新后出现问题，可使用回滚功能还原"
+  echo -e "- 下载直连失败会自动尝试GitHub加速: ${GITHUB_ACCELERATOR}"
   if is_auto_update_enabled; then
     echo -e "- 自动更新状态: ${GREEN}已启用${NC} (每天 $(get_auto_update_time_display))"
   else
