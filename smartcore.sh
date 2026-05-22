@@ -1,15 +1,20 @@
 #!/bin/sh
 
 # Mihomo Smart内核更新脚本
-# 根据系统架构自动下载对应的mihomo Smart内核并重启OpenClash服务
+# 根据系统架构自动下载对应的mihomo Smart内核并重启Nikki服务
 
 # 错误处理
 set -e
 trap 'echo "错误: 脚本执行失败，行 $LINENO"; exit 1' ERR
 
 # 全局变量
-OPENCLASH_DIR="/etc/openclash"
-CORE_DIR="${OPENCLASH_DIR}/core"
+NIKKI_DIR="/etc/nikki"
+CORE_DIR="/usr/bin"
+CORE_PATH="${CORE_DIR}/mihomo"
+CORE_BACKUP_PATH="${CORE_PATH}.bak"
+CORE_CURRENT_PATH="${CORE_PATH}.current"
+SERVICE_NAME="nikki"
+SERVICE_SCRIPT="/etc/init.d/${SERVICE_NAME}"
 TEMP_DIR="/tmp/smartcore_temp"
 SOURCE_REPO="vernesong/mihomo" # 默认使用vernesong镜像版本
 VERSION_TAG="Prerelease-Alpha"
@@ -26,6 +31,17 @@ NC='\033[0m' # 无颜色
 # 日志函数
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# 确保Nikki核心具有可执行权限
+ensure_core_permissions() {
+  if [ -f "$CORE_PATH" ] && [ ! -x "$CORE_PATH" ]; then
+    log "检测到 ${CORE_PATH} 缺少执行权限，正在修复..."
+    chmod 755 "$CORE_PATH" || {
+      log "错误: 无法为 ${CORE_PATH} 设置执行权限"
+      return 1
+    }
+  fi
 }
 
 # 清理临时文件
@@ -145,14 +161,16 @@ detect_arch() {
 
 # 获取当前内核信息
 get_current_info() {
-  if [ ! -f "${CORE_DIR}/clash_meta" ]; then
+  if [ ! -f "$CORE_PATH" ]; then
     echo "未安装"
     return
   fi
+
+  ensure_core_permissions || return 1
   
-  if [ -x "${CORE_DIR}/clash_meta" ]; then
-    VERSION_FULL=$("${CORE_DIR}/clash_meta" -v 2>/dev/null || echo "无法获取版本")
-    INSTALL_DATE=$(date -r "${CORE_DIR}/clash_meta" "+%Y-%m-%d %H:%M:%S")
+  if [ -x "$CORE_PATH" ]; then
+    VERSION_FULL=$("$CORE_PATH" -v 2>/dev/null || echo "无法获取版本")
+    INSTALL_DATE=$(date -r "$CORE_PATH" "+%Y-%m-%d %H:%M:%S")
     
     # 提取内核版本和系统信息
     CORE_INFO=$(echo "$VERSION_FULL" | head -n 1 | awk '{print $1, $2, $3}')
@@ -175,10 +193,11 @@ check_version() {
   
   # 确保临时目录存在
   mkdir -p "$TEMP_DIR"
+  ensure_core_permissions || return 2
   
   # 获取本地版本号
-  if [ -z "$LOCAL_VERSION" ] && [ -f "${CORE_DIR}/clash_meta" ] && [ -x "${CORE_DIR}/clash_meta" ]; then
-    LOCAL_VERSION_FULL=$("${CORE_DIR}/clash_meta" -v 2>/dev/null || echo "")
+  if [ -z "$LOCAL_VERSION" ] && [ -f "$CORE_PATH" ] && [ -x "$CORE_PATH" ]; then
+    LOCAL_VERSION_FULL=$("$CORE_PATH" -v 2>/dev/null || echo "")
     LOCAL_VERSION=$(echo "$LOCAL_VERSION_FULL" | head -n 1 | grep -o 'alpha-[0-9a-zA-Z]*' || echo "")
   fi
   
@@ -257,25 +276,26 @@ update_core() {
   
   # 解压文件
   echo -ne "解压内核文件..."
-  if gzip -d -c "${TEMP_DIR}/${CLASH_FILENAME}" > "${TEMP_DIR}/clash"; then
+  if gzip -d -c "${TEMP_DIR}/${CLASH_FILENAME}" > "${TEMP_DIR}/mihomo" &&
+     chmod 755 "${TEMP_DIR}/mihomo"; then
     echo "完成"
   else
     echo "失败"
-    log "错误: 解压文件失败"
+    log "错误: 解压文件或设置 mihomo 权限失败"
     return 1
   fi
   
   # 备份旧内核文件
-  if [ -f "${CORE_DIR}/clash_meta" ]; then
+  if [ -f "$CORE_PATH" ]; then
     echo -ne "备份现有内核文件..."
-    cp "${CORE_DIR}/clash_meta" "${CORE_DIR}/clash_meta.bak"
+    cp "$CORE_PATH" "$CORE_BACKUP_PATH"
     echo "完成"
   fi
   
   # 移动新内核文件
   echo -ne "安装新内核..."
-  if cp "${TEMP_DIR}/clash" "${CORE_DIR}/clash_meta"; then
-    chmod 755 "${CORE_DIR}/clash_meta"
+  if cp "${TEMP_DIR}/mihomo" "$CORE_PATH"; then
+    chmod 755 "$CORE_PATH"
     echo "完成"
   else
     echo "失败"
@@ -283,23 +303,23 @@ update_core() {
     return 1
   fi
   
-  # 重启OpenClash服务
-  echo -ne "重启OpenClash服务..."
-  if /etc/init.d/openclash restart >/dev/null 2>&1; then
+  # 重启Nikki服务
+  echo -ne "重启Nikki服务..."
+  if "$SERVICE_SCRIPT" restart >/dev/null 2>&1; then
     echo "完成"
   else
     echo "失败"
-    log "错误: 重启OpenClash服务失败"
+    log "错误: 重启Nikki服务失败"
     return 1
   fi
   
-  echo -e "${GREEN}OpenClash Smart内核更新成功完成！${NC}"
+  echo -e "${GREEN}Nikki Mihomo Smart内核更新成功完成！${NC}"
   return 0
 }
 
 # 回滚到备份版本
 rollback() {
-  if [ ! -f "${CORE_DIR}/clash_meta.bak" ]; then
+  if [ ! -f "$CORE_BACKUP_PATH" ]; then
     log "错误: 没有找到备份文件"
     return 1
   fi
@@ -307,21 +327,21 @@ rollback() {
   log "开始回滚到备份版本..."
   
   # 备份当前版本
-  if [ -f "${CORE_DIR}/clash_meta" ]; then
-    cp "${CORE_DIR}/clash_meta" "${CORE_DIR}/clash_meta.current"
-    log "当前版本已备份为 clash_meta.current"
+  if [ -f "$CORE_PATH" ]; then
+    cp "$CORE_PATH" "$CORE_CURRENT_PATH"
+    log "当前版本已备份为 $(basename "$CORE_CURRENT_PATH")"
   fi
   
   # 恢复备份
-  cp "${CORE_DIR}/clash_meta.bak" "${CORE_DIR}/clash_meta" && chmod 755 "${CORE_DIR}/clash_meta" || {
+  cp "$CORE_BACKUP_PATH" "$CORE_PATH" && chmod 755 "$CORE_PATH" || {
     log "错误: 无法恢复备份文件"
     return 1
   }
   
-  # 重启OpenClash服务
-  log "重启OpenClash服务..."
-  /etc/init.d/openclash restart || {
-    log "错误: 重启OpenClash服务失败"
+  # 重启Nikki服务
+  log "重启Nikki服务..."
+  "$SERVICE_SCRIPT" restart || {
+    log "错误: 重启Nikki服务失败"
     return 1
   }
   
@@ -337,7 +357,7 @@ get_latest_changelog() {
   mkdir -p "$TEMP_DIR"
   
   # 获取发布标签页内容
-  if curl -s -L --connect-timeout 10 --max-time 20 "https://github.com/vernesong/OpenClash/releases/tag/mihomo" > "${TEMP_DIR}/release_page.html"; then
+  if curl -s -L --connect-timeout 10 --max-time 20 "https://github.com/${SOURCE_REPO}/releases/tag/${VERSION_TAG}" > "${TEMP_DIR}/release_page.html"; then
     # 尝试简单提取第一个Date行开始的内容
     echo "Changelog" > "$CHANGELOG_FILE"
 
@@ -392,7 +412,7 @@ get_latest_changelog() {
 show_changelog() {
   clear
   echo "==========================================="
-  echo "      Mihomo Smart 最新更新日志     "
+  echo "      Nikki Mihomo Smart 最新更新日志     "
   echo "==========================================="
   echo
   
@@ -401,7 +421,7 @@ show_changelog() {
     { get_latest_changelog; } > /dev/null 2>&1
     if [ $? -ne 0 ]; then
       echo -e "${RED}无法获取更新日志，提取失效${NC}"
-      echo -e "请前往 https://github.com/vernesong/OpenClash/releases/tag/mihomo 查看"
+      echo -e "请前往 https://github.com/${SOURCE_REPO}/releases/tag/${VERSION_TAG} 查看"
       echo
       read -p "按回车键返回主菜单..." dummy
       return
@@ -421,7 +441,7 @@ show_menu() {
   clear
   
   echo "==========================================="
-  echo "   Mihomo Smart 内核管理脚本 v${SCRIPT_VERSION}   "
+  echo "   Nikki Mihomo Smart 内核管理脚本 v${SCRIPT_VERSION}   "
   echo "==========================================="
   echo "当前内核: "
   get_current_info
@@ -437,7 +457,8 @@ show_menu() {
   
   # 添加说明区域
   echo -e "说明: "
-  echo -e "- 本工具用于管理OpenClash的Mihomo Smart内核"
+  echo -e "- 本工具用于管理Nikki的Mihomo Smart内核"
+  echo -e "- Nikki默认核心路径: ${CORE_PATH}"
   echo -e "- 更新前会自动备份当前内核"
   echo -e "- 如更新后出现问题，可使用回滚功能还原"
   echo -e "- 可添加计划任务自动更新：0 3 * * * ./smartcore.sh --auto"
@@ -552,7 +573,7 @@ main() {
     DEBUG_MODE="1"
     log "开启调试模式"
   elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-    echo "Mihomo Smart 内核管理脚本 v${SCRIPT_VERSION}"
+    echo "Nikki Mihomo Smart 内核管理脚本 v${SCRIPT_VERSION}"
     echo "用法: $0 [选项]"
     echo "选项:"
     echo "  -a, --auto    自动检查并更新内核"
