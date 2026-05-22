@@ -20,7 +20,9 @@ SOURCE_REPO="vernesong/mihomo" # 默认使用vernesong镜像版本
 VERSION_TAG="Prerelease-Alpha"
 OS="linux"
 CHANGELOG_FILE="${TEMP_DIR}/changelog.txt"
-SCRIPT_VERSION="1.1.1" # 脚本版本号
+SCRIPT_VERSION="1.1.2" # 脚本版本号
+AUTO_UPDATE_SCHEDULE="0 3 * * *"
+AUTO_UPDATE_LOG="/tmp/smartcore_update.log"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -31,6 +33,162 @@ NC='\033[0m' # 无颜色
 # 日志函数
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# 获取脚本绝对路径，供计划任务使用
+get_script_path() {
+  if [ -n "$SCRIPT_PATH" ]; then
+    return 0
+  fi
+
+  if command -v readlink >/dev/null 2>&1; then
+    SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || echo "")
+  fi
+
+  if [ -z "$SCRIPT_PATH" ]; then
+    SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)
+    SCRIPT_PATH="${SCRIPT_DIR}/$(basename "$0")"
+  fi
+
+  [ -n "$SCRIPT_PATH" ]
+}
+
+# 生成自动更新计划任务内容
+get_auto_update_entry() {
+  get_script_path || return 1
+  printf '%s %s --auto >> %s 2>&1\n' "$AUTO_UPDATE_SCHEDULE" "$SCRIPT_PATH" "$AUTO_UPDATE_LOG"
+}
+
+# 获取当前自动更新计划任务
+get_auto_update_cron_line() {
+  get_script_path || return 1
+  crontab -l 2>/dev/null | grep -F "$SCRIPT_PATH --auto" | tail -n 1
+}
+
+# 从现有计划任务中加载自动更新时间
+load_auto_update_schedule() {
+  CRON_LINE=$(get_auto_update_cron_line 2>/dev/null || echo "")
+
+  if [ -n "$CRON_LINE" ]; then
+    CRON_MINUTE=$(echo "$CRON_LINE" | awk '{print $1}')
+    CRON_HOUR=$(echo "$CRON_LINE" | awk '{print $2}')
+
+    case "$CRON_MINUTE:$CRON_HOUR" in
+      ''|*[^0-9:]*)
+        return 1
+        ;;
+      *)
+        AUTO_UPDATE_SCHEDULE="${CRON_MINUTE} ${CRON_HOUR} * * *"
+        return 0
+        ;;
+    esac
+  fi
+
+  return 1
+}
+
+# 将当前自动更新计划转换为 HH:MM
+get_auto_update_time_display() {
+  AUTO_MINUTE=$(echo "$AUTO_UPDATE_SCHEDULE" | awk '{print $1}')
+  AUTO_HOUR=$(echo "$AUTO_UPDATE_SCHEDULE" | awk '{print $2}')
+
+  printf '%02d:%02d\n' "$AUTO_HOUR" "$AUTO_MINUTE"
+}
+
+# 让用户输入自动更新时间
+prompt_auto_update_time() {
+  CURRENT_TIME=$(get_auto_update_time_display)
+  printf "请输入自动更新时间 [HH:MM] (当前: %s，回车保持不变): " "$CURRENT_TIME"
+  read -r INPUT_TIME
+
+  if [ -z "$INPUT_TIME" ]; then
+    return 0
+  fi
+
+  case "$INPUT_TIME" in
+    [0-1][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9])
+      INPUT_HOUR=${INPUT_TIME%:*}
+      INPUT_MINUTE=${INPUT_TIME#*:}
+      INPUT_HOUR=$(echo "$INPUT_HOUR" | sed 's/^0*//')
+      INPUT_MINUTE=$(echo "$INPUT_MINUTE" | sed 's/^0*//')
+      [ -z "$INPUT_HOUR" ] && INPUT_HOUR=0
+      [ -z "$INPUT_MINUTE" ] && INPUT_MINUTE=0
+      AUTO_UPDATE_SCHEDULE="${INPUT_MINUTE} ${INPUT_HOUR} * * *"
+      return 0
+      ;;
+    *)
+      log "错误: 时间格式无效，请使用 HH:MM，例如 03:00"
+      return 1
+      ;;
+  esac
+}
+
+# 检查是否已启用自动更新
+is_auto_update_enabled() {
+  get_script_path || return 1
+  crontab -l 2>/dev/null | grep -F "$SCRIPT_PATH --auto" >/dev/null 2>&1
+}
+
+# 重启cron服务以应用配置
+restart_cron_service() {
+  if [ -x /etc/init.d/cron ]; then
+    /etc/init.d/cron restart >/dev/null 2>&1 || {
+      log "警告: cron服务重启失败，请手动执行 /etc/init.d/cron restart"
+      return 1
+    }
+  fi
+}
+
+# 启用自动更新
+enable_auto_update() {
+  mkdir -p "$TEMP_DIR"
+  CRON_TMP_FILE="${TEMP_DIR}/crontab.tmp"
+
+  get_script_path || {
+    log "错误: 无法获取脚本绝对路径"
+    return 1
+  }
+
+  load_auto_update_schedule >/dev/null 2>&1 || true
+
+  if [ -z "$AUTO_UPDATE_NONINTERACTIVE" ]; then
+    prompt_auto_update_time || return 1
+  fi
+
+  crontab -l 2>/dev/null | grep -F -v "$SCRIPT_PATH --auto" > "$CRON_TMP_FILE" || true
+  get_auto_update_entry >> "$CRON_TMP_FILE" || return 1
+
+  crontab "$CRON_TMP_FILE" || {
+    log "错误: 写入自动更新计划任务失败"
+    return 1
+  }
+
+  restart_cron_service || true
+  log "自动更新已启用: $(get_auto_update_time_display)"
+  log "脚本路径: ${SCRIPT_PATH}"
+  return 0
+}
+
+# 禁用自动更新
+disable_auto_update() {
+  mkdir -p "$TEMP_DIR"
+  CRON_TMP_FILE="${TEMP_DIR}/crontab.tmp"
+
+  get_script_path || {
+    log "错误: 无法获取脚本绝对路径"
+    return 1
+  }
+
+  crontab -l 2>/dev/null | grep -F -v "$SCRIPT_PATH --auto" > "$CRON_TMP_FILE" || true
+
+  crontab "$CRON_TMP_FILE" || {
+    log "错误: 移除自动更新计划任务失败"
+    return 1
+  }
+
+  restart_cron_service || true
+  log "自动更新已关闭"
+  return 0
 }
 
 # 尝试从GitHub Release API响应中提取日志
@@ -477,9 +635,59 @@ show_changelog() {
   read -p "按回车键返回主菜单..." dummy
 }
 
+# 自动更新设置菜单
+manage_auto_update() {
+  clear
+  echo "==========================================="
+  echo "        Nikki 自动更新设置"
+  echo "==========================================="
+  echo
+
+  load_auto_update_schedule >/dev/null 2>&1 || true
+
+  if is_auto_update_enabled; then
+    AUTO_UPDATE_STATUS="${GREEN}已启用${NC}"
+  else
+    AUTO_UPDATE_STATUS="${YELLOW}未启用${NC}"
+  fi
+
+  get_script_path >/dev/null 2>&1 || true
+  echo -e "当前状态: ${AUTO_UPDATE_STATUS}"
+  echo "执行时间: 每天 $(get_auto_update_time_display)"
+  echo "脚本路径: ${SCRIPT_PATH:-未知}"
+  echo "日志路径: ${AUTO_UPDATE_LOG}"
+  echo
+  echo "1. 启用或更新时间自动更新任务"
+  echo "2. 关闭自动更新任务"
+  echo "0. 返回主菜单"
+  echo "==========================================="
+
+  printf "请输入选项 [0-2]: "
+  read -r auto_choice
+
+  case $auto_choice in
+    1)
+      enable_auto_update
+      ;;
+    2)
+      disable_auto_update
+      ;;
+    0)
+      return 0
+      ;;
+    *)
+      echo "无效的选择，请重试"
+      ;;
+  esac
+
+  echo
+  read -p "按回车键返回主菜单..." dummy
+}
+
 # 显示菜单
 show_menu() {
   clear
+  load_auto_update_schedule >/dev/null 2>&1 || true
   
   echo "==========================================="
   echo "   Nikki Mihomo Smart 内核管理脚本 v${SCRIPT_VERSION}   "
@@ -502,7 +710,11 @@ show_menu() {
   echo -e "- Nikki默认核心路径: ${CORE_PATH}"
   echo -e "- 更新前会自动备份当前内核"
   echo -e "- 如更新后出现问题，可使用回滚功能还原"
-  echo -e "- 可添加计划任务自动更新：0 3 * * * ./smartcore.sh --auto"
+  if is_auto_update_enabled; then
+    echo -e "- 自动更新状态: ${GREEN}已启用${NC} (每天 $(get_auto_update_time_display))"
+  else
+    echo -e "- 自动更新状态: ${YELLOW}未启用${NC}"
+  fi
   echo -e "- 也可以使用: ./smartcore.sh -c 仅查看更新日志"
   echo
   
@@ -511,10 +723,11 @@ show_menu() {
   echo "2. 仅检查更新"
   echo "3. 回滚到上一版本"
   echo "4. 查看最新更新日志"
+  echo "5. 设置自动更新"
   echo "0. 退出"
   echo "==========================================="
   
-  printf "请输入选项 [0-4]: "
+  printf "请输入选项 [0-5]: "
   read -r choice
   
   case $choice in
@@ -552,6 +765,9 @@ show_menu() {
       ;;
     4)
       show_changelog
+      ;;
+    5)
+      manage_auto_update
       ;;
     0)
       echo "感谢使用！"
