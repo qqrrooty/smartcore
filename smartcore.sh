@@ -23,7 +23,7 @@ CHANGELOG_FILE="${TEMP_DIR}/changelog.txt"
 SCRIPT_VERSION="1.1.4" # 脚本版本号
 AUTO_UPDATE_SCHEDULE="0 3 * * *"
 AUTO_UPDATE_LOG="/tmp/smartcore_update.log"
-GITHUB_ACCELERATOR="${SMARTCORE_GITHUB_ACCELERATOR:-https://cdn.gh-proxy.com/}"
+GITHUB_ACCELERATOR="${SMARTCORE_GITHUB_ACCELERATOR:-https://gh-proxy.com/}"
 
 # 颜色定义
 RED='\033[0;31m'
