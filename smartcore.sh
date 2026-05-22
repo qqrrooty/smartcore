@@ -20,7 +20,7 @@ SOURCE_REPO="vernesong/mihomo" # 默认使用vernesong镜像版本
 VERSION_TAG="Prerelease-Alpha"
 OS="linux"
 CHANGELOG_FILE="${TEMP_DIR}/changelog.txt"
-SCRIPT_VERSION="1.1.0" # 脚本版本号
+SCRIPT_VERSION="1.1.1" # 脚本版本号
 
 # 颜色定义
 RED='\033[0;31m'
@@ -31,6 +31,48 @@ NC='\033[0m' # 无颜色
 # 日志函数
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# 尝试从GitHub Release API响应中提取日志
+parse_release_json() {
+  RELEASE_JSON_FILE="$1"
+  PUBLISHED_AT=""
+  RELEASE_BODY=""
+  RELEASE_TAG=""
+
+  if command -v jsonfilter >/dev/null 2>&1; then
+    PUBLISHED_AT=$(jsonfilter -i "$RELEASE_JSON_FILE" -e '@.published_at' 2>/dev/null || echo "")
+    RELEASE_BODY=$(jsonfilter -i "$RELEASE_JSON_FILE" -e '@.body' 2>/dev/null || echo "")
+    RELEASE_TAG=$(jsonfilter -i "$RELEASE_JSON_FILE" -e '@.tag_name' 2>/dev/null || echo "")
+  else
+    PUBLISHED_AT=$(sed -n 's/.*"published_at":"\([^"]*\)".*/\1/p' "$RELEASE_JSON_FILE" | head -n 1)
+    RELEASE_BODY=$(sed -n 's/.*"body":"\(.*\)","discussion_url".*/\1/p' "$RELEASE_JSON_FILE" | head -n 1)
+    RELEASE_TAG=$(sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p' "$RELEASE_JSON_FILE" | head -n 1)
+
+    if [ -n "$RELEASE_BODY" ]; then
+      RELEASE_BODY=$(printf '%b' "$(echo "$RELEASE_BODY" | \
+        sed 's/\\"/"/g; s/\\\\/\\/g; s/\\r//g; s/\\n/\n/g; s/\\t/\t/g')")
+    fi
+  fi
+
+  if [ -z "$PUBLISHED_AT" ] && [ -z "$RELEASE_BODY" ]; then
+    return 1
+  fi
+
+  {
+    echo "Changelog"
+    [ -n "$PUBLISHED_AT" ] && echo "Published: $PUBLISHED_AT"
+    [ -n "$REMOTE_VERSION" ] && echo "Version: $REMOTE_VERSION"
+    [ -z "$REMOTE_VERSION" ] && [ -n "$RELEASE_TAG" ] && echo "Release Tag: $RELEASE_TAG"
+    echo
+    if [ -n "$RELEASE_BODY" ]; then
+      echo "$RELEASE_BODY"
+    else
+      echo "该版本未提供更新说明。"
+    fi
+  } > "$CHANGELOG_FILE"
+
+  return 0
 }
 
 # 确保Nikki核心具有可执行权限
@@ -177,7 +219,7 @@ get_current_info() {
     SYS_INFO=$(echo "$VERSION_FULL" | head -n 1 | cut -d' ' -f4-)
     
     # 保存完整版本号以供其他函数使用
-    LOCAL_VERSION=$(echo "$CORE_INFO" | grep -o 'alpha-[0-9a-zA-Z]*' || echo "")
+    LOCAL_VERSION=$(echo "$CORE_INFO" | grep -o 'alpha-[0-9A-Za-z-]*' || echo "")
     
     echo "$CORE_INFO"
     echo "$SYS_INFO"
@@ -198,7 +240,7 @@ check_version() {
   # 获取本地版本号
   if [ -z "$LOCAL_VERSION" ] && [ -f "$CORE_PATH" ] && [ -x "$CORE_PATH" ]; then
     LOCAL_VERSION_FULL=$("$CORE_PATH" -v 2>/dev/null || echo "")
-    LOCAL_VERSION=$(echo "$LOCAL_VERSION_FULL" | head -n 1 | grep -o 'alpha-[0-9a-zA-Z]*' || echo "")
+    LOCAL_VERSION=$(echo "$LOCAL_VERSION_FULL" | head -n 1 | grep -o 'alpha-[0-9A-Za-z-]*' || echo "")
   fi
   
   # 获取远程版本号
@@ -355,57 +397,56 @@ get_latest_changelog() {
   
   # 确保临时目录存在
   mkdir -p "$TEMP_DIR"
-  
-  # 获取发布标签页内容
-  if curl -s -L --connect-timeout 10 --max-time 20 "https://github.com/${SOURCE_REPO}/releases/tag/${VERSION_TAG}" > "${TEMP_DIR}/release_page.html"; then
-    # 尝试简单提取第一个Date行开始的内容
+  RELEASE_API_URL="https://api.github.com/repos/${SOURCE_REPO}/releases/tags/${VERSION_TAG}"
+  RELEASE_JSON_FILE="${TEMP_DIR}/release.json"
+  RELEASE_PAGE_FILE="${TEMP_DIR}/release_page.html"
+
+  # 优先通过GitHub Release API获取日志
+  if curl -s -L --connect-timeout 10 --max-time 20 \
+    -H "Accept: application/vnd.github+json" \
+    "$RELEASE_API_URL" > "$RELEASE_JSON_FILE"; then
+    if parse_release_json "$RELEASE_JSON_FILE"; then
+      return 0
+    fi
+    log "API日志解析失败，尝试回退到网页提取..."
+  else
+    log "无法访问GitHub Release API，尝试回退到网页提取..."
+  fi
+
+  # 回退到旧的网页提取方式
+  if curl -s -L --connect-timeout 10 --max-time 20 "https://github.com/${SOURCE_REPO}/releases/tag/${VERSION_TAG}" > "$RELEASE_PAGE_FILE"; then
     echo "Changelog" > "$CHANGELOG_FILE"
 
-    # 使用lynx或w3m提取纯文本（如果安装了的话）
     if command -v lynx >/dev/null 2>&1; then
-      lynx -dump -nolist "${TEMP_DIR}/release_page.html" > "${TEMP_DIR}/page_text.txt"
+      lynx -dump -nolist "$RELEASE_PAGE_FILE" > "${TEMP_DIR}/page_text.txt"
     elif command -v w3m >/dev/null 2>&1; then
-      w3m -dump "${TEMP_DIR}/release_page.html" > "${TEMP_DIR}/page_text.txt"
+      w3m -dump "$RELEASE_PAGE_FILE" > "${TEMP_DIR}/page_text.txt"
     else
-      # 回退到简单的HTML清理
-      cat "${TEMP_DIR}/release_page.html" | 
-        sed 's/<[^>]*>//g' | 
-        sed 's/&nbsp;/ /g' | 
-        sed 's/&lt;/</g' | 
-        sed 's/&gt;/>/g' | 
-        sed 's/&#39;/'"'"'/g' > "${TEMP_DIR}/page_text.txt"
+      sed 's/<[^>]*>//g; s/&nbsp;/ /g; s/&lt;/</g; s/&gt;/>/g; s/&#39;/'"'"'/g' "$RELEASE_PAGE_FILE" > "${TEMP_DIR}/page_text.txt"
     fi
 
-    # 提取第一个Date行到下一个Date行之前的内容（即只提取最新的一条更新日志）
-    # 1. 获取所有Date行的行号
     DATE_LINES=$(grep -n "Date: " "${TEMP_DIR}/page_text.txt" | cut -d: -f1)
-    
-    # 2. 获取第一个和第二个Date行的行号
     FIRST_DATE_LINE=$(echo "$DATE_LINES" | head -n 1)
     SECOND_DATE_LINE=$(echo "$DATE_LINES" | head -n 2 | tail -n 1)
-    
-    # 如果找到了第一个Date行
+
     if [ -n "$FIRST_DATE_LINE" ]; then
-      # 如果找到了第二个Date行，则提取第一个到第二个之间的内容
       if [ -n "$SECOND_DATE_LINE" ]; then
         sed -n "${FIRST_DATE_LINE},$(($SECOND_DATE_LINE - 1))p" "${TEMP_DIR}/page_text.txt" >> "$CHANGELOG_FILE"
       else
-        # 如果没有找到第二个Date行，则提取第一个Date行到文件末尾
         sed -n "${FIRST_DATE_LINE},\$p" "${TEMP_DIR}/page_text.txt" >> "$CHANGELOG_FILE"
       fi
-      
-      # 检查是否成功提取了日志
+
       if grep -q "Date: " "$CHANGELOG_FILE"; then
         return 0
       fi
     fi
-    
+
     log "无法提取Changelog内容"
     return 1
-  else
-    log "无法获取发布页面，请检查网络连接"
-    return 1
   fi
+
+  log "无法获取发布页面，请检查网络连接"
+  return 1
 }
 
 # 显示最新的更新日志
@@ -428,8 +469,8 @@ show_changelog() {
     fi
   fi
   
-  # 优化显示，跳过Changelog标题行，从Date:开始显示
-  sed -n '/Date:/,$p' "$CHANGELOG_FILE" | grep -v "Assets" | grep -v "Loading" | grep -v "Uh oh!" | grep -v "There was an error" > "${TEMP_DIR}/clean_log.txt"
+  # 优化显示，优先完整显示API日志，网页回退模式下继续过滤噪音
+  sed '/^$/N;/^\n$/D' "$CHANGELOG_FILE" | grep -v "Assets" | grep -v "Loading" | grep -v "Uh oh!" | grep -v "There was an error" > "${TEMP_DIR}/clean_log.txt"
   cat "${TEMP_DIR}/clean_log.txt"
   echo
   echo "==========================================="
