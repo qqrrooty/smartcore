@@ -20,10 +20,12 @@ SOURCE_REPO="vernesong/mihomo" # 默认使用vernesong镜像版本
 VERSION_TAG="Prerelease-Alpha"
 OS="linux"
 CHANGELOG_FILE="${TEMP_DIR}/changelog.txt"
-SCRIPT_VERSION="1.1.4" # 脚本版本号
+SCRIPT_VERSION="1.1.6" # 脚本版本号
 AUTO_UPDATE_SCHEDULE="0 3 * * *"
 AUTO_UPDATE_LOG="/tmp/smartcore_update.log"
-GITHUB_ACCELERATOR="${SMARTCORE_GITHUB_ACCELERATOR:-https://gh-proxy.com/}"
+GITHUB_ACCELERATOR="${SMARTCORE_GITHUB_ACCELERATOR:-https://cdn.gh-proxy.com/}"
+GITHUB_ACCELERATOR_CONNECT_TIMEOUT="${SMARTCORE_GITHUB_ACCELERATOR_CONNECT_TIMEOUT:-15}"
+GITHUB_ACCELERATOR_MAX_TIME="${SMARTCORE_GITHUB_ACCELERATOR_MAX_TIME:-60}"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -71,7 +73,8 @@ curl_with_accelerator_fallback() {
   ACCELERATED_URL=$(accelerate_github_url "$CURL_URL" 2>/dev/null || echo "")
   if [ -n "$ACCELERATED_URL" ]; then
     log "直连失败，尝试使用GitHub加速下载..."
-    curl -s -L --connect-timeout 10 --max-time 20 "$ACCELERATED_URL" > "$CURL_OUTPUT"
+    log "加速地址: $ACCELERATED_URL"
+    curl -s -L --connect-timeout "$GITHUB_ACCELERATOR_CONNECT_TIMEOUT" --max-time "$GITHUB_ACCELERATOR_MAX_TIME" "$ACCELERATED_URL" > "$CURL_OUTPUT"
     return $?
   fi
 
@@ -83,16 +86,28 @@ download_file() {
   DOWNLOAD_URL="$1"
   DOWNLOAD_OUTPUT="$2"
 
-  if wget -q -O "$DOWNLOAD_OUTPUT" "$DOWNLOAD_URL" 2>/dev/null ||
-     curl -s -L -o "$DOWNLOAD_OUTPUT" "$DOWNLOAD_URL" 2>/dev/null; then
+  if command -v curl >/dev/null 2>&1 &&
+     curl -L --progress-bar -o "$DOWNLOAD_OUTPUT" "$DOWNLOAD_URL"; then
+    return 0
+  fi
+
+  if command -v wget >/dev/null 2>&1 &&
+     wget -O "$DOWNLOAD_OUTPUT" "$DOWNLOAD_URL"; then
     return 0
   fi
 
   ACCELERATED_URL=$(accelerate_github_url "$DOWNLOAD_URL" 2>/dev/null || echo "")
   if [ -n "$ACCELERATED_URL" ]; then
     log "直连下载失败，尝试使用GitHub加速下载..."
-    if wget -q -O "$DOWNLOAD_OUTPUT" "$ACCELERATED_URL" 2>/dev/null ||
-       curl -s -L -o "$DOWNLOAD_OUTPUT" "$ACCELERATED_URL" 2>/dev/null; then
+    log "加速地址: $ACCELERATED_URL"
+
+    if command -v curl >/dev/null 2>&1 &&
+       curl -L --progress-bar --connect-timeout "$GITHUB_ACCELERATOR_CONNECT_TIMEOUT" --max-time "$GITHUB_ACCELERATOR_MAX_TIME" -o "$DOWNLOAD_OUTPUT" "$ACCELERATED_URL"; then
+      return 0
+    fi
+
+    if command -v wget >/dev/null 2>&1 &&
+       wget -O "$DOWNLOAD_OUTPUT" "$ACCELERATED_URL"; then
       return 0
     fi
   fi
@@ -111,7 +126,7 @@ check_url_available() {
   ACCELERATED_URL=$(accelerate_github_url "$CHECK_URL" 2>/dev/null || echo "")
   if [ -n "$ACCELERATED_URL" ]; then
     log "直连验证失败，尝试使用GitHub加速验证..."
-    curl -s -L --head --fail "$ACCELERATED_URL" >/dev/null
+    curl -s -L --connect-timeout "$GITHUB_ACCELERATOR_CONNECT_TIMEOUT" --max-time "$GITHUB_ACCELERATOR_MAX_TIME" --head --fail "$ACCELERATED_URL" >/dev/null
     return $?
   fi
 
@@ -491,7 +506,7 @@ check_version() {
   if curl_with_accelerator_fallback "$TEMP_VERSION" -s -L --connect-timeout 10 --max-time 15 "$VERSION_URL"; then
     REMOTE_VERSION=$(cat "$TEMP_VERSION" | tr -d '\r\n')
     
-    if [ -n "$REMOTE_VERSION" ]; then
+    if [ -n "$REMOTE_VERSION" ] && echo "$REMOTE_VERSION" | grep -q '^alpha-'; then
       # 构建下载URL和文件名
       CLASH_FILENAME="${CLASH_BASE_FILENAME}-${REMOTE_VERSION}.gz"
       CLASH_URL="${BASE_URL}/${CLASH_FILENAME}"
@@ -517,7 +532,7 @@ check_version() {
         return 1  # 无需更新
       fi
     else
-      log "无法提取远程版本号"
+      log "无法提取远程版本号，版本文件内容异常"
       return 2  # 提取失败
     fi
   else
@@ -547,7 +562,7 @@ update_core() {
   mkdir -p "$CORE_DIR"
   
   # 下载内核文件
-  echo -ne "下载内核中..."
+  echo "下载内核中..."
   if download_file "$CLASH_URL" "${TEMP_DIR}/${CLASH_FILENAME}"; then
     echo "完成"
   else
