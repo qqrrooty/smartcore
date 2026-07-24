@@ -183,6 +183,53 @@ install_smart_command() {
   return 1
 }
 
+# 清理旧版smartcore.sh文件
+cleanup_legacy_smartcore_file() {
+  get_script_path || return 1
+
+  SCRIPT_BASENAME=$(basename "$SCRIPT_PATH")
+  if [ "$SCRIPT_PATH" != "$SMART_COMMAND_PATH" ] &&
+     [ "$SCRIPT_BASENAME" = "smartcore.sh" ] &&
+     [ -f "$SCRIPT_PATH" ] &&
+     [ -f "$SMART_COMMAND_PATH" ]; then
+    if cmp -s "$SCRIPT_PATH" "$SMART_COMMAND_PATH" 2>/dev/null; then
+      if rm -f "$SCRIPT_PATH" 2>/dev/null; then
+        log "已清理旧脚本文件: ${SCRIPT_PATH}"
+        return 0
+      fi
+      log "警告: 无法清理旧脚本文件 ${SCRIPT_PATH}"
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
+# 清理旧版smartcore.sh自动更新计划任务
+cleanup_legacy_auto_update_entries() {
+  mkdir -p "$TEMP_DIR"
+  CRON_TMP_FILE="${TEMP_DIR}/crontab.tmp"
+
+  if ! crontab -l >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! crontab -l 2>/dev/null | grep -F "smartcore.sh --auto" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  crontab -l 2>/dev/null | grep -F -v "smartcore.sh --auto" > "$CRON_TMP_FILE" || true
+
+  crontab "$CRON_TMP_FILE" || {
+    log "警告: 清理旧版smartcore.sh自动更新任务失败"
+    return 1
+  }
+
+  restart_cron_service || true
+  log "已清理旧版smartcore.sh自动更新任务"
+  return 0
+}
+
 # 获取自动更新命令路径
 get_auto_update_command() {
   if [ -x "$SMART_COMMAND_PATH" ]; then
@@ -490,11 +537,15 @@ enable_auto_update() {
     prompt_auto_update_variant_choice || return 1
   fi
 
-  install_smart_command >/dev/null 2>&1 || true
+  if install_smart_command >/dev/null 2>&1; then
+    cleanup_legacy_auto_update_entries >/dev/null 2>&1 || true
+    cleanup_legacy_smartcore_file >/dev/null 2>&1 || true
+  fi
 
   crontab -l 2>/dev/null | \
     grep -F -v "$SCRIPT_PATH --auto" | \
-    grep -F -v "$SMART_COMMAND_PATH --auto" > "$CRON_TMP_FILE" || true
+    grep -F -v "$SMART_COMMAND_PATH --auto" | \
+    grep -F -v "smartcore.sh --auto" > "$CRON_TMP_FILE" || true
   get_auto_update_entry >> "$CRON_TMP_FILE" || return 1
 
   crontab "$CRON_TMP_FILE" || {
@@ -521,7 +572,8 @@ disable_auto_update() {
 
   crontab -l 2>/dev/null | \
     grep -F -v "$SCRIPT_PATH --auto" | \
-    grep -F -v "$SMART_COMMAND_PATH --auto" > "$CRON_TMP_FILE" || true
+    grep -F -v "$SMART_COMMAND_PATH --auto" | \
+    grep -F -v "smartcore.sh --auto" > "$CRON_TMP_FILE" || true
 
   crontab "$CRON_TMP_FILE" || {
     log "错误: 移除自动更新计划任务失败"
@@ -1182,7 +1234,10 @@ main() {
   # 注册退出清理
   trap clean_temp EXIT
 
-  install_smart_command >/dev/null 2>&1 || true
+  if install_smart_command >/dev/null 2>&1; then
+    cleanup_legacy_auto_update_entries >/dev/null 2>&1 || true
+    cleanup_legacy_smartcore_file >/dev/null 2>&1 || true
+  fi
 
   HAS_ARGS=""
   RUN_MODE="menu"
